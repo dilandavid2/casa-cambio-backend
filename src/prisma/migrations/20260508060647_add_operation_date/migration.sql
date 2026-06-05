@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Operation" ADD COLUMN     "operationDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;

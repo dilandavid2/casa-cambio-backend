@@ -1,0 +1,466 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/////////////////////////
+// ENUMS
+/////////////////////////
+
+enum UserRole {
+  ADMIN
+  OPERATOR
+  SUPERVISOR
+  AUDITOR
+}
+
+enum ClientType {
+  FORMAL
+  GENERIC
+}
+
+enum MovementType {
+  ENTRY
+  EXIT
+  RESERVE
+  RELEASE
+  ADJUSTMENT
+  COMPENSATION
+}
+
+enum OperationModificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PaymentMethodType {
+  CASH
+  BANK_TRANSFER
+  CARD
+  ZELLE
+  PAYPAL
+  BINANCE
+  USDT
+  OTHER
+}
+
+enum OperationPaymentStatus {
+  PAID
+  PARTIAL
+  PENDING
+}
+
+/////////////////////////
+// USERS
+/////////////////////////
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  pinHash   String
+  role      UserRole
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  auditLogs             AuditLog[]
+  transferVerifications TransferVerification[]
+
+  createdOperations     Operation[]             @relation("createdBy")
+  approvedModifications OperationModification[] @relation("approvedBy")
+}
+
+/////////////////////////
+// CURRENCIES
+/////////////////////////
+
+model Currency {
+  id                        Int     @id @default(autoincrement())
+  code                      String  @unique
+  name                      String
+  isActive                  Boolean @default(true)
+  allowsOperationalCost     Boolean @default(true)
+  defaultOperationalPercent Float   @default(0)
+
+  accounts          Account[]
+  marketRates       MarketRate[]
+  currencyPosition  CurrencyPosition?
+  operationSplits   OperationSplit[]
+  paymentMethods    PaymentMethod[]
+  operationPayments OperationPayment[]
+
+  sourceOperations  Operation[]        @relation("sourceCurrency")
+  targetOperations  Operation[]        @relation("targetCurrency")
+  pendingOperations PendingOperation[]
+}
+
+/////////////////////////
+// MARKET RATES
+/////////////////////////
+
+model MarketRate {
+  id         Int      @id @default(autoincrement())
+  currencyId Int
+  rateToCOP  Float
+  source     String?
+  createdAt  DateTime @default(now())
+
+  currency Currency @relation(fields: [currencyId], references: [id])
+}
+
+/////////////////////////
+// ACCOUNTS
+/////////////////////////
+
+model Account {
+  id         Int     @id @default(autoincrement())
+  name       String
+  country    String
+  type       String
+  platform   String?
+  identifier String?
+  balance    Float   @default(0)
+  isActive   Boolean @default(true)
+
+  status String? // ACTIVE, REPLACED, CLOSED
+  notes  String?
+
+  currencyId Int
+  currency   Currency @relation(fields: [currencyId], references: [id])
+
+  sourceOperations Operation[] @relation("OperationSourceAccount")
+  targetOperations Operation[] @relation("OperationTargetAccount")
+
+  previousAccountId Int?
+  previousAccount   Account?           @relation("AccountReplacement", fields: [previousAccountId], references: [id])
+  nextAccounts      Account[]          @relation("AccountReplacement")
+  operationSplits   OperationSplit[]
+  operationPayments OperationPayment[]
+
+  paymentMethods PaymentMethod[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  movements AccountMovement[]
+}
+
+/////////////////////////
+// CLIENTS
+/////////////////////////
+
+model Client {
+  id       Int        @id @default(autoincrement())
+  type     ClientType
+  name     String
+  phone    String?
+  document String?
+  country  String?
+  alias    String?
+  isActive Boolean    @default(true)
+
+  operations Operation[]
+}
+
+/////////////////////////
+// OPERATION TYPES
+/////////////////////////
+
+model OperationType {
+  id   Int    @id @default(autoincrement())
+  name String
+
+  operations Operation[]
+}
+
+/////////////////////////
+// OPERATION STATUS
+/////////////////////////
+
+model OperationStatus {
+  id   Int    @id @default(autoincrement())
+  name String
+
+  operations Operation[]
+}
+
+/////////////////////////
+// OPERATIONS
+/////////////////////////
+
+model Operation {
+  id   Int    @id @default(autoincrement())
+  code String @unique
+
+  clientId Int
+  client   Client @relation(fields: [clientId], references: [id])
+
+  typeId Int
+  type   OperationType @relation(fields: [typeId], references: [id])
+
+  statusId Int
+  status   OperationStatus @relation(fields: [statusId], references: [id])
+
+  sourceCurrencyId Int
+  sourceCurrency   Currency @relation("sourceCurrency", fields: [sourceCurrencyId], references: [id])
+
+  targetCurrencyId Int
+  targetCurrency   Currency @relation("targetCurrency", fields: [targetCurrencyId], references: [id])
+
+  sourceAccountId Int?
+  sourceAccount   Account? @relation("OperationSourceAccount", fields: [sourceAccountId], references: [id])
+
+  targetAccountId Int?
+  targetAccount   Account? @relation("OperationTargetAccount", fields: [targetAccountId], references: [id])
+
+  amountSource          Float
+  amountTargetEstimated Float
+  amountTargetFinal     Float?
+
+  marketRate         Float
+  copToTargetRate    Float?
+  operationalPercent Float
+  effectiveRate      Float
+  clientRate         Float
+  paymentMode        String? @default("IMMEDIATE")
+
+  valueCOP           Float
+  estimatedProfitCOP Float?
+  realProfitCOP      Float?
+
+  requiresCashDelivery Boolean @default(false)
+
+  createdAt     DateTime  @default(now())
+  operationDate DateTime  @default(now())
+  verifiedAt    DateTime?
+  completedAt   DateTime?
+
+  paymentStatus OperationPaymentStatus @default(PAID)
+  amountPaid    Float                  @default(0)
+  pendingAmount Float                  @default(0)
+
+  createdById Int
+  createdBy   User @relation("createdBy", fields: [createdById], references: [id])
+
+  movements             AccountMovement[]
+  compensationsA        Compensation[]         @relation("operationA")
+  compensationsB        Compensation[]         @relation("operationB")
+  pending               PendingOperation[]
+  transferVerifications TransferVerification[]
+  splits                OperationSplit[]
+  payments              OperationPayment[]
+
+  originalModifications OperationModification[] @relation("originalOperation")
+  newFromModification   OperationModification[] @relation("newOperation")
+}
+
+/////////////////////////
+// ACCOUNT MOVEMENTS
+/////////////////////////
+
+model AccountMovement {
+  id Int @id @default(autoincrement())
+
+  accountId Int
+  account   Account @relation(fields: [accountId], references: [id])
+
+  operationId Int?
+  operation   Operation? @relation(fields: [operationId], references: [id])
+
+  type      MovementType
+  amount    Float
+  valueCOP  Float
+  createdAt DateTime     @default(now())
+
+  description String?
+}
+
+/////////////////////////
+// CURRENCY POSITION
+/////////////////////////
+
+model CurrencyPosition {
+  id Int @id @default(autoincrement())
+
+  currencyId Int      @unique
+  currency   Currency @relation(fields: [currencyId], references: [id])
+
+  totalBalance   Float
+  totalCostCOP   Float
+  averageRateCOP Float
+
+  marketRate         Float
+  operationalPercent Float
+  effectiveRate      Float
+
+  valueCOP            Float
+  operationalValueCOP Float
+
+  updatedAt DateTime @updatedAt
+}
+
+/////////////////////////
+// COMPENSATIONS
+/////////////////////////
+
+model Compensation {
+  id Int @id @default(autoincrement())
+
+  operationAId Int
+  operationBId Int
+
+  operationA Operation @relation("operationA", fields: [operationAId], references: [id])
+  operationB Operation @relation("operationB", fields: [operationBId], references: [id])
+
+  amountA Float
+  amountB Float
+
+  createdAt DateTime @default(now())
+}
+
+/////////////////////////
+// PENDING OPERATIONS
+/////////////////////////
+
+model PendingOperation {
+  id Int @id @default(autoincrement())
+
+  operationId Int
+  operation   Operation @relation(fields: [operationId], references: [id])
+
+  currencyId Int
+  currency   Currency @relation(fields: [currencyId], references: [id])
+
+  amountPending Float
+  reason        String?
+  resolved      Boolean @default(false)
+
+  createdAt DateTime @default(now())
+}
+
+/////////////////////////
+// OPERATION MODIFICATIONS
+/////////////////////////
+
+model OperationModification {
+  id Int @id @default(autoincrement())
+
+  originalOperationId Int
+  originalOperation   Operation @relation("originalOperation", fields: [originalOperationId], references: [id])
+
+  newOperationId Int?       @unique
+  newOperation   Operation? @relation("newOperation", fields: [newOperationId], references: [id])
+
+  status OperationModificationStatus
+
+  reason       String?
+  approvedById Int?
+  approvedBy   User?   @relation("approvedBy", fields: [approvedById], references: [id])
+
+  createdAt  DateTime  @default(now())
+  approvedAt DateTime?
+}
+
+model AuditLog {
+  id     Int   @id @default(autoincrement())
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id])
+
+  action      String
+  entityType  String
+  entityId    Int?
+  description String?
+
+  createdAt DateTime @default(now())
+}
+
+model TransferVerification {
+  id          Int       @id @default(autoincrement())
+  operationId Int
+  operation   Operation @relation(fields: [operationId], references: [id])
+
+  status String  @default("PENDING") // PENDING, CONFIRMED, REJECTED
+  reason String?
+  notes  String?
+
+  createdAt    DateTime  @default(now())
+  verifiedAt   DateTime?
+  verifiedById Int?
+  verifiedBy   User?     @relation(fields: [verifiedById], references: [id])
+}
+
+model OperationSplit {
+  id          Int       @id @default(autoincrement())
+  operationId Int
+  operation   Operation @relation(fields: [operationId], references: [id])
+
+  targetCurrencyId Int
+  targetCurrency   Currency @relation(fields: [targetCurrencyId], references: [id])
+
+  accountId Int?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  amount      Float
+  valueCOP    Float?
+  destination String?
+  notes       String?
+
+  createdAt DateTime @default(now())
+}
+
+model PaymentMethod {
+  id       Int               @id @default(autoincrement())
+  name     String
+  type     PaymentMethodType
+  isActive Boolean           @default(true)
+
+  currencyId Int?
+  currency   Currency? @relation(fields: [currencyId], references: [id])
+
+  accountId Int?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  commissionPercent Float @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  operationPayments OperationPayment[]
+}
+
+model OperationPayment {
+  id Int @id @default(autoincrement())
+
+  operationId Int
+  operation   Operation @relation(fields: [operationId], references: [id])
+
+  paymentMethodId Int?
+  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+
+  accountId Int?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  currencyId Int?
+  currency   Currency? @relation(fields: [currencyId], references: [id])
+
+  paymentDate DateTime?
+
+  amount     Float
+  commission Float  @default(0)
+  netAmount  Float
+  valueCOP   Float?
+
+  rateToCOP  Float?
+  rateSource String?
+
+  requiresVerification Boolean   @default(false)
+  verifiedAt           DateTime?
+
+  notes     String?
+  createdAt DateTime @default(now())
+}
