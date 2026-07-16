@@ -58,6 +58,38 @@ async function main() {
       }),
   );
 
+  const operatorValues = [
+    process.env.SEED_OPERATOR_NAME,
+    process.env.SEED_OPERATOR_EMAIL,
+    process.env.SEED_OPERATOR_PASSWORD,
+    process.env.SEED_OPERATOR_PIN,
+  ];
+  if (operatorValues.some((value) => value?.trim())) {
+    const operatorName = required('SEED_OPERATOR_NAME');
+    const operatorEmail = required('SEED_OPERATOR_EMAIL').toLowerCase();
+    const operatorPassword = required('SEED_OPERATOR_PASSWORD');
+    const operatorPin = required('SEED_OPERATOR_PIN');
+    if (operatorPassword.length < 12) {
+      throw new Error('SEED_OPERATOR_PASSWORD debe tener al menos 12 caracteres');
+    }
+    if (!/^\d{4,12}$/.test(operatorPin)) {
+      throw new Error('SEED_OPERATOR_PIN debe contener entre 4 y 12 dígitos');
+    }
+    await createIfMissing(
+      `Operador ${operatorEmail}`,
+      () => prisma.user.findUnique({ where: { email: operatorEmail } }),
+      async () => prisma.user.create({
+        data: {
+          name: operatorName,
+          email: operatorEmail,
+          password: await hash(operatorPassword),
+          pinHash: await hash(operatorPin),
+          role: 'OPERATOR',
+        },
+      }),
+    );
+  }
+
   const currencies = new Map<string, { id: number }>();
   for (const item of [
     { code: 'COP', name: 'Peso colombiano' },
