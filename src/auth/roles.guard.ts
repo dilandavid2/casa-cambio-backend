@@ -1,61 +1,61 @@
 import {
   CanActivate,
   ExecutionContext,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { ROLES_KEY } from './roles.decorator';
+import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
+import { IS_PUBLIC_KEY } from './public.decorator';
+import { ROLES_KEY } from './roles.decorator';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
+    private readonly jwt: JwtService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const requiredRoles = this.reflector.getAllAndOverride<string[]>(
-      ROLES_KEY,
-      [context.getHandler(), context.getClass()],
-    );
-
-    if (!requiredRoles || requiredRoles.length === 0) {
+    const targets = [context.getHandler(), context.getClass()];
+    if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, targets)) {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const userIdHeader = request.headers['x-user-id'];
+    const request = context.switchToHttp().getRequest<{
+      headers: { cookie?: string };
+      currentUser?: unknown;
+    }>();
+    const token = request.headers.cookie
+      ?.split(';')
+      .map((item) => item.trim().split('='))
+      .find(([name]) => name === 'cambio_session')
+      ?.slice(1)
+      .join('=');
+    if (!token) throw new UnauthorizedException('Sesión requerida');
 
-    if (!userIdHeader) {
-      throw new UnauthorizedException(
-        'Falta el header x-user-id para validar permisos',
-      );
-    }
-
-    const userId = Number(userIdHeader);
-
-    if (Number.isNaN(userId)) {
-      throw new UnauthorizedException('x-user-id debe ser numérico');
+    let payload: { sub: number };
+    try {
+      payload = await this.jwt.verifyAsync<{ sub: number }>(token);
+    } catch {
+      throw new UnauthorizedException('Sesión inválida o vencida');
     }
 
     const user = await this.prisma.user.findUnique({
-      where: { id: userId },
+      where: { id: payload.sub },
     });
-
-    if (!user) {
-      throw new UnauthorizedException('Usuario no encontrado');
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Usuario inactivo o inexistente');
     }
-
     request.currentUser = user;
 
-    if (!requiredRoles.includes(user.role)) {
-      throw new UnauthorizedException(
-        `El rol ${user.role} no tiene permiso para esta acción`,
-      );
+    const roles = this.reflector.getAllAndOverride<string[]>(ROLES_KEY, targets);
+    if (roles?.length && !roles.includes(user.role)) {
+      throw new ForbiddenException(`El rol ${user.role} no tiene permiso`);
     }
-
     return true;
   }
 }

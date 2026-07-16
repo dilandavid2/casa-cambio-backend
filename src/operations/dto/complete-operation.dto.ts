@@ -5,8 +5,9 @@ export class CompleteOperationDto {
   @Min(0.0001)
   amountTargetFinal: number;
 
+  @IsOptional()
   @IsInt()
-  confirmedByUserId: number;
+  confirmedByUserId?: number;
 
   @IsOptional()
   @IsInt()

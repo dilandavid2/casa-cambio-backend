@@ -45,18 +45,21 @@ export class CreateOperationDto {
   @IsString()
   code: string;
 
+  @IsOptional()
   @IsInt()
-  clientId: number;
+  clientId?: number;
 
   @IsOptional()
   @IsString()
   clientName?: string;
 
+  @IsOptional()
   @IsInt()
-  typeId: number;
+  typeId?: number;
 
+  @IsOptional()
   @IsInt()
-  statusId: number;
+  statusId?: number;
 
   @IsInt()
   sourceCurrencyId: number;
@@ -99,8 +102,9 @@ export class CreateOperationDto {
   @IsString()
   paymentMode?: string;
 
+  @IsOptional()
   @IsInt()
-  createdById: number;
+  createdById?: number;
 
   @IsOptional()
   @IsArray()

@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { verify } from 'argon2';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCurrencyDto } from './dto/create-currency.dto';
 import { UpdateCurrencyDto } from './dto/update-currency.dto';
@@ -70,8 +75,44 @@ export class CurrenciesService {
     });
   }
 
-  async remove(id: number) {
-    await this.findOne(id);
+  async remove(id: number, userId: number, pin: string) {
+    const currency = await this.findOne(id);
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    let pinMatches = false;
+    try {
+      pinMatches = !!user && (await verify(user.pinHash, pin));
+    } catch {
+      pinMatches = false;
+    }
+    if (!pinMatches) throw new BadRequestException('PIN incorrecto');
+
+    const related = await this.prisma.currency.findUnique({
+      where: { id },
+      select: {
+        _count: {
+          select: {
+            accounts: true,
+            marketRates: true,
+            sourceOperations: true,
+            targetOperations: true,
+            operationSplits: true,
+            operationPayments: true,
+            paymentMethods: true,
+            pendingOperations: true,
+          },
+        },
+        currencyPosition: { select: { id: true } },
+      },
+    });
+    const relationCount = Object.values(related!._count).reduce(
+      (total, count) => total + count,
+      0,
+    );
+    if (relationCount > 0 || related?.currencyPosition) {
+      throw new BadRequestException(
+        `No se puede borrar ${currency.code} porque tiene cuentas, operaciones o registros relacionados`,
+      );
+    }
 
     return this.prisma.currency.delete({
       where: { id },

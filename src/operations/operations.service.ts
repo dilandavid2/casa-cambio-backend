@@ -121,7 +121,10 @@ export class OperationsService {
     };
   }
 
-  async create(createOperationDto: CreateOperationDto) {
+  async create(
+    createOperationDto: CreateOperationDto,
+    authenticatedUserId?: number,
+  ) {
     let client: Awaited<ReturnType<typeof this.prisma.client.findFirst>> = null;
 
     if (createOperationDto.clientName?.trim()) {
@@ -139,9 +142,13 @@ export class OperationsService {
           },
         });
       }
-    } else {
+    } else if (createOperationDto.clientId) {
       client = await this.prisma.client.findUnique({
         where: { id: createOperationDto.clientId },
+      });
+    } else {
+      client = await this.prisma.client.findFirst({
+        where: { name: 'Sistema interno', type: 'GENERIC' },
       });
     }
 
@@ -149,23 +156,31 @@ export class OperationsService {
       throw new NotFoundException('No se encontró o creó el cliente');
     }
 
-    const operationType = await this.prisma.operationType.findUnique({
-      where: { id: createOperationDto.typeId },
-    });
+    const operationType = createOperationDto.typeId
+      ? await this.prisma.operationType.findUnique({
+          where: { id: createOperationDto.typeId },
+        })
+      : await this.prisma.operationType.findFirst({
+          where: { name: 'Cambio de divisas' },
+        });
 
     if (!operationType) {
       throw new NotFoundException(
-        `No se encontró el tipo de operación con id ${createOperationDto.typeId}`,
+        'No se encontró el tipo interno "Cambio de divisas"',
       );
     }
 
-    const operationStatus = await this.prisma.operationStatus.findUnique({
-      where: { id: createOperationDto.statusId },
-    });
+    const operationStatus = createOperationDto.statusId
+      ? await this.prisma.operationStatus.findUnique({
+          where: { id: createOperationDto.statusId },
+        })
+      : await this.prisma.operationStatus.findFirst({
+          where: { name: 'Creada' },
+        });
 
     if (!operationStatus) {
       throw new NotFoundException(
-        `No se encontró el estado de operación con id ${createOperationDto.statusId}`,
+        'No se encontró el estado inicial "Creada"',
       );
     }
 
@@ -179,9 +194,9 @@ export class OperationsService {
       );
     }
 
-    if (sourceCurrency.code === 'VES' && !createOperationDto.manualRateToCOP) {
+    if (sourceCurrency.code !== 'COP' && !createOperationDto.manualRateToCOP) {
       throw new BadRequestException(
-        'Para operaciones en VES debes ingresar una tasa manual',
+        `Debes ingresar la tasa manual de ${sourceCurrency.code} a COP`,
       );
     }
 
@@ -195,8 +210,64 @@ export class OperationsService {
       );
     }
 
+    if (
+      targetCurrency.code !== 'COP' &&
+      targetCurrency.id !== sourceCurrency.id &&
+      !createOperationDto.copToTargetRate &&
+      !createOperationDto.amountTargetEstimated &&
+      !(createOperationDto.splits?.length)
+    ) {
+      throw new BadRequestException(
+        `Debes ingresar la tasa manual de ${targetCurrency.code} a COP`,
+      );
+    }
+
+    if (createOperationDto.paymentMode === 'IMMEDIATE') {
+      if (!createOperationDto.sourceAccountId) {
+        throw new BadRequestException(
+          'Debes seleccionar la cuenta donde entra el dinero recibido',
+        );
+      }
+      const sourceAccount = await this.prisma.account.findUnique({
+        where: { id: createOperationDto.sourceAccountId },
+      });
+      if (
+        !sourceAccount ||
+        !sourceAccount.isActive ||
+        sourceAccount.currencyId !== sourceCurrency.id
+      ) {
+        throw new BadRequestException(
+          'La cuenta de entrada no está activa o no coincide con la moneda recibida',
+        );
+      }
+
+      if (!createOperationDto.splits?.length) {
+        if (!createOperationDto.targetAccountId) {
+          throw new BadRequestException(
+            'Debes seleccionar la cuenta de donde sale el dinero',
+          );
+        }
+        const targetAccount = await this.prisma.account.findUnique({
+          where: { id: createOperationDto.targetAccountId },
+        });
+        if (
+          !targetAccount ||
+          !targetAccount.isActive ||
+          targetAccount.currencyId !== targetCurrency.id
+        ) {
+          throw new BadRequestException(
+            'La cuenta de salida no está activa o no coincide con la moneda entregada',
+          );
+        }
+      }
+    }
+
+    const createdById = authenticatedUserId ?? createOperationDto.createdById;
+    if (!createdById) {
+      throw new NotFoundException('No se encontró el usuario creador');
+    }
     const user = await this.prisma.user.findUnique({
-      where: { id: createOperationDto.createdById },
+      where: { id: createdById },
     });
 
     if (!user) {
@@ -242,24 +313,16 @@ export class OperationsService {
       createOperationDto.sourceCurrencyId
     ) {
       if (targetCurrency.code !== 'COP') {
-        const latestTargetRate = await this.prisma.marketRate.findFirst({
-          where: {
-            currencyId: createOperationDto.targetCurrencyId,
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-        });
-
-        if (!latestTargetRate) {
-          throw new NotFoundException(
-            `No existe una tasa de mercado registrada para la moneda destino con id ${createOperationDto.targetCurrencyId}`,
-          );
+        const targetRate = createOperationDto.copToTargetRate;
+        if (!targetRate || targetRate <= 0) {
+          if (!createOperationDto.amountTargetEstimated) {
+            throw new BadRequestException(
+              `Debes indicar la tasa de ${targetCurrency.code} a COP o el monto que recibirá el cliente`,
+            );
+          }
+        } else {
+          amountTargetEstimated = this.round2(valueCOP / targetRate);
         }
-
-        amountTargetEstimated = this.round2(
-          valueCOP / latestTargetRate.rateToCOP,
-        );
       }
     }
 
@@ -365,7 +428,10 @@ export class OperationsService {
       },
     );
     const paymentStatus =
-      createOperationDto.paymentStatus ?? OperationPaymentStatus.PENDING;
+      createOperationDto.paymentStatus ??
+      (createOperationDto.paymentMode === 'PENDING'
+        ? OperationPaymentStatus.PENDING
+        : OperationPaymentStatus.PAID);
 
     const hasSplits = (createOperationDto.splits?.length ?? 0) > 0;
 
@@ -376,13 +442,16 @@ export class OperationsService {
           : amountTargetEstimated
         : (createOperationDto.amountPaid ?? 0);
 
-    const pendingAmount = this.round2(
-      createOperationDto.amountSource - amountPaid,
-    );
+    const pendingAmount =
+      paymentStatus === OperationPaymentStatus.PAID
+        ? 0
+        : this.round2(createOperationDto.amountSource - amountPaid);
 
     const operationDate = new Date(createOperationDto.operationDate);
 
     const hoy = new Date();
+    const finDeHoy = new Date(hoy);
+    finDeHoy.setHours(23, 59, 59, 999);
     const fechaMinima = new Date('2024-01-01');
 
     if (operationDate < fechaMinima) {
@@ -391,25 +460,34 @@ export class OperationsService {
       );
     }
 
-    if (operationDate > hoy) {
+    if (operationDate > finDeHoy) {
       throw new BadRequestException('La fecha no puede ser futura');
     }
 
-    const finalAmountTargetEstimated =
-      createOperationDto.amountTargetEstimated ?? amountTargetEstimated;
+    const finalAmountTargetEstimated = this.round2(
+      createOperationDto.amountTargetEstimated ?? amountTargetEstimated,
+    );
+    const targetRateToCOP =
+      targetCurrency.code === 'COP'
+        ? 1
+        : this.round2(
+            createOperationDto.copToTargetRate ??
+              valueCOP / finalAmountTargetEstimated,
+          );
 
     const operation = await this.prisma.operation.create({
       data: {
         code: createOperationDto.code,
         clientId: client.id,
-        typeId: createOperationDto.typeId,
-        statusId: createOperationDto.statusId,
+        typeId: operationType.id,
+        statusId: operationStatus.id,
         sourceCurrencyId: createOperationDto.sourceCurrencyId,
         sourceAccountId: createOperationDto.sourceAccountId ?? null,
         targetCurrencyId: createOperationDto.targetCurrencyId,
         amountSource: createOperationDto.amountSource,
         amountTargetEstimated: finalAmountTargetEstimated,
         marketRate,
+        copToTargetRate: targetRateToCOP,
         operationalPercent,
         effectiveRate,
         clientRate: effectiveRate,
@@ -423,7 +501,7 @@ export class OperationsService {
         operationDate: createOperationDto.operationDate
           ? new Date(createOperationDto.operationDate)
           : new Date(),
-        createdById: createOperationDto.createdById,
+        createdById,
         splits:
           preparedSplits.length > 0
             ? {
@@ -721,7 +799,7 @@ export class OperationsService {
     const sourceRateToCOP =
       operation.sourceCurrency.code === 'COP' ? 1 : operation.marketRate;
 
-    const totalPagado = this.round2(
+    const verifiedPaymentsTotal = this.round2(
       operation.payments.reduce((sum, payment) => {
         if (!payment.verifiedAt) return sum;
 
@@ -735,10 +813,21 @@ export class OperationsService {
       }, 0),
     );
 
-    const saldoPendiente = this.round2(operation.amountSource - totalPagado);
+    const isImmediate = operation.paymentMode !== 'PENDING';
+    const totalPagado = isImmediate
+      ? operation.amountSource
+      : verifiedPaymentsTotal;
+    const saldoPendiente = isImmediate
+      ? 0
+      : this.round2(operation.amountSource - totalPagado);
 
-    const paymentStatus =
-      saldoPendiente <= 0 ? 'PAID' : totalPagado > 0 ? 'PARTIAL' : 'PENDING';
+    const paymentStatus = isImmediate
+      ? OperationPaymentStatus.PAID
+      : saldoPendiente <= 0
+        ? OperationPaymentStatus.PAID
+        : totalPagado > 0
+          ? OperationPaymentStatus.PARTIAL
+          : OperationPaymentStatus.PENDING;
 
     return {
       ...operation,
@@ -779,7 +868,7 @@ export class OperationsService {
     });
   }
 
-  async remove(id: number, deleteCode: string) {
+  async remove(id: number, deleteCode: string, userId: number) {
     if (deleteCode !== 'ELIMINAR123') {
       throw new BadRequestException('Código de eliminación incorrecto');
     }
@@ -813,7 +902,7 @@ export class OperationsService {
     });
 
     await this.auditLogsService.createLog({
-      userId: 1,
+      userId,
       action: 'DELETE_OPERATION',
       entityType: 'Operation',
       entityId: id,
@@ -875,7 +964,10 @@ export class OperationsService {
       );
     }
 
-    if (operation.paymentStatus !== OperationPaymentStatus.PAID) {
+    if (
+      operation.paymentMode === 'PENDING' &&
+      operation.paymentStatus !== OperationPaymentStatus.PAID
+    ) {
       throw new BadRequestException(
         'La operación todavía tiene saldo pendiente',
       );
@@ -943,74 +1035,46 @@ export class OperationsService {
       };
     }
 
-    const operationPayments = await this.prisma.operationPayment.findMany({
-      where: { operationId: id },
-      include: {
-        paymentMethod: {
-          include: {
-            account: {
-              include: {
-                currency: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    if (
+      operation.paymentMode !== 'PENDING' &&
+      !operation.sourceAccountId
+    ) {
+      throw new BadRequestException(
+        'Debes seleccionar la cuenta donde entra el dinero recibido',
+      );
+    }
 
-    if (operationPayments.length > 0) {
-      for (const payment of operationPayments) {
-        const paymentMethod = payment.paymentMethod;
-        if (!paymentMethod) {
-          continue;
-        }
-        if (paymentMethod.currencyId !== operation.sourceCurrencyId) {
-          throw new BadRequestException(
-            `El método de pago ${paymentMethod.name} no coincide con la moneda origen de la operación`,
-          );
-        }
-
-        if (!paymentMethod.isActive) {
-          throw new BadRequestException(
-            `El método de pago ${paymentMethod.name} está inactivo`,
-          );
-        }
-
-        if (!paymentMethod.account) {
-          continue;
-        }
-
-        if (
-          paymentMethod.currencyId &&
-          paymentMethod.account.currencyId !== paymentMethod.currencyId
-        ) {
-          throw new BadRequestException(
-            `La cuenta asociada al método ${paymentMethod.name} no coincide con la moneda del método`,
-          );
-        }
-
-        const newPaymentAccountBalance = this.round2(
-          paymentMethod.account.balance + payment.netAmount,
+    if (operation.paymentMode !== 'PENDING' && operation.sourceAccountId) {
+      const sourceAccount = await this.prisma.account.findUnique({
+        where: { id: operation.sourceAccountId },
+      });
+      if (!sourceAccount || !sourceAccount.isActive) {
+        throw new BadRequestException(
+          'La cuenta de entrada no está disponible',
         );
-
-        await this.prisma.account.update({
-          where: { id: paymentMethod.account.id },
-          data: {
-            balance: newPaymentAccountBalance,
-          },
-        });
-
-        await this.prisma.accountMovement.create({
-          data: {
-            accountId: paymentMethod.account.id,
-            operationId: id,
-            type: 'ENTRY',
-            amount: payment.netAmount,
-            valueCOP: payment.valueCOP ?? payment.netAmount,
-            description: `Ingreso por pago ${paymentMethod.name} en operación ${operation.code}`,
-          },
-        });
       }
+      if (sourceAccount.currencyId !== operation.sourceCurrencyId) {
+        throw new BadRequestException(
+          'La cuenta de entrada no coincide con la moneda recibida',
+        );
+      }
+
+      await this.prisma.account.update({
+        where: { id: sourceAccount.id },
+        data: {
+          balance: this.round2(sourceAccount.balance + operation.amountSource),
+        },
+      });
+      await this.prisma.accountMovement.create({
+        data: {
+          accountId: sourceAccount.id,
+          operationId: id,
+          type: 'ENTRY',
+          amount: operation.amountSource,
+          valueCOP: operation.valueCOP,
+          description: `Entrada de dinero recibido en operación ${operation.code}`,
+        },
+      });
     }
 
     const operationSplits = await this.prisma.operationSplit.findMany({
@@ -1085,6 +1149,11 @@ export class OperationsService {
           realProfitCOP,
           completedAt: new Date(),
           statusId: completedStatus.id,
+          ...(operation.paymentMode !== 'PENDING' && {
+            paymentStatus: OperationPaymentStatus.PAID,
+            amountPaid: operation.amountSource,
+            pendingAmount: 0,
+          }),
         },
         include: {
           client: true,
@@ -1104,7 +1173,7 @@ export class OperationsService {
       });
 
       await this.auditLogsService.createLog({
-        userId: completeOperationDto.confirmedByUserId,
+        userId: completeOperationDto.confirmedByUserId!,
         action: 'COMPLETE_SPLIT_OPERATION',
         entityType: 'Operation',
         entityId: updatedOperation.id,
@@ -1114,14 +1183,17 @@ export class OperationsService {
       return updatedOperation;
     }
 
-    if (completeOperationDto.accountId) {
+    const targetAccountId =
+      completeOperationDto.accountId ?? operation.targetAccountId;
+
+    if (targetAccountId) {
       const account = await this.prisma.account.findUnique({
-        where: { id: completeOperationDto.accountId },
+        where: { id: targetAccountId },
       });
 
       if (!account) {
         throw new NotFoundException(
-          `No existe la cuenta con id ${completeOperationDto.accountId}`,
+          `No existe la cuenta con id ${targetAccountId}`,
         );
       }
 
@@ -1174,6 +1246,11 @@ export class OperationsService {
         realProfitCOP,
         completedAt: new Date(),
         statusId: completedStatus.id,
+        ...(operation.paymentMode !== 'PENDING' && {
+          paymentStatus: OperationPaymentStatus.PAID,
+          amountPaid: operation.amountSource,
+          pendingAmount: 0,
+        }),
       },
       include: {
         client: true,
@@ -1193,7 +1270,7 @@ export class OperationsService {
     });
 
     await this.auditLogsService.createLog({
-      userId: completeOperationDto.confirmedByUserId,
+      userId: completeOperationDto.confirmedByUserId!,
       action: 'COMPLETE_OPERATION',
       entityType: 'Operation',
       entityId: updatedOperation.id,
@@ -1303,7 +1380,7 @@ export class OperationsService {
     });
 
     await this.auditLogsService.createLog({
-      userId: completeOperationDto.confirmedByUserId,
+      userId: completeOperationDto.confirmedByUserId!,
       action: 'COMPLETE_VERIFIED_OPERATION',
       entityType: 'Operation',
       entityId: id,
@@ -1382,7 +1459,7 @@ export class OperationsService {
     const sourceRateToCOP =
       operation.sourceCurrency.code === 'COP' ? 1 : operation.marketRate;
 
-    const totalPagado = this.round2(
+    const verifiedPaymentsTotal = this.round2(
       operation.payments.reduce((sum, payment) => {
         if (!payment.verifiedAt) return sum;
 
@@ -1396,10 +1473,21 @@ export class OperationsService {
       }, 0),
     );
 
-    const saldoPendiente = this.round2(operation.amountSource - totalPagado);
+    const isImmediate = operation.paymentMode !== 'PENDING';
+    const totalPagado = isImmediate
+      ? operation.amountSource
+      : verifiedPaymentsTotal;
+    const saldoPendiente = isImmediate
+      ? 0
+      : this.round2(operation.amountSource - totalPagado);
 
-    const paymentStatus =
-      saldoPendiente <= 0 ? 'PAID' : totalPagado > 0 ? 'PARTIAL' : 'PENDING';
+    const paymentStatus = isImmediate
+      ? OperationPaymentStatus.PAID
+      : saldoPendiente <= 0
+        ? OperationPaymentStatus.PAID
+        : totalPagado > 0
+          ? OperationPaymentStatus.PARTIAL
+          : OperationPaymentStatus.PENDING;
 
     return {
       totalPagado,
@@ -1409,6 +1497,7 @@ export class OperationsService {
       operation: {
         id: operation.id,
         code: operation.code,
+        paymentMode: operation.paymentMode ?? 'IMMEDIATE',
         client: operation.client?.name ?? 'Cliente sin registrar',
         type: operation.type.name,
         status: operation.status.name,

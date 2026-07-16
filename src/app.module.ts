@@ -13,6 +13,8 @@ import { AccountMovementsModule } from './account-movements/account-movements.mo
 import { DashboardModule } from './dashboard/dashboard.module';
 import { TransferVerificationsModule } from './transfer-verifications/transfer-verifications.module';
 import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
+import { AuthModule } from './auth/auth.module';
+import { OperationCatalogsModule } from './operation-catalogs/operation-catalogs.module';
 
 @Module({
   imports: [
@@ -26,14 +28,16 @@ import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
     DashboardModule,
     TransferVerificationsModule,
     PaymentMethodsModule,
+    AuthModule,
+    OperationCatalogsModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
-    // {
-    //   provide: APP_GUARD,
-    //   useClass: RolesGuard,
-    // },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
+    },
   ],
 })
 export class AppModule {}

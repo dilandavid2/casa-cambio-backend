@@ -7,12 +7,16 @@ import {
   Param,
   Query,
   ParseIntPipe,
+  Delete,
 } from '@nestjs/common';
 import { AccountsService } from './accounts.service';
 import { CreateAccountDto } from './dto/create-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { ReplaceAccountDto } from './dto/replace-account.dto';
 import { Roles } from '../auth/roles.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { User } from '@prisma/client';
+import { ConfirmPinDto } from '../auth/dto/confirm-pin.dto';
 
 @Controller('accounts')
 export class AccountsController {
@@ -46,6 +50,7 @@ export class AccountsController {
       operationDate?: string;
       description?: string;
     },
+    @CurrentUser() user: User,
   ) {
     return this.accountsService.transferBetweenAccounts(
       Number(body.fromAccountId),
@@ -53,6 +58,7 @@ export class AccountsController {
       Number(body.amount),
       body.description,
       body.operationDate,
+      user.id,
     );
   }
 
@@ -115,6 +121,16 @@ export class AccountsController {
   @Roles('ADMIN')
   deactivate(@Param('id', ParseIntPipe) id: number) {
     return this.accountsService.deactivate(id);
+  }
+
+  @Delete(':id')
+  @Roles('ADMIN')
+  remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ConfirmPinDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.accountsService.remove(id, user.id, dto.pin);
   }
 
   @Patch(':id/replace')

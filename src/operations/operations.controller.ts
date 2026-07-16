@@ -14,6 +14,8 @@ import { UpdateOperationDto } from './dto/update-operation.dto';
 import { CompleteOperationDto } from './dto/complete-operation.dto';
 import { AddOperationPaymentDto } from './dto/add-operation-payment.dto';
 import { Roles } from '../auth/roles.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { User } from '@prisma/client';
 
 @Controller('operations')
 export class OperationsController {
@@ -34,8 +36,11 @@ export class OperationsController {
 
   @Post()
   @Roles('ADMIN', 'OPERATOR')
-  create(@Body() createOperationDto: CreateOperationDto) {
-    return this.operationsService.create(createOperationDto);
+  create(
+    @Body() createOperationDto: CreateOperationDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.operationsService.create(createOperationDto, user.id);
   }
 
   @Get()
@@ -67,8 +72,12 @@ export class OperationsController {
   complete(
     @Param('id', ParseIntPipe) id: number,
     @Body() completeOperationDto: CompleteOperationDto,
+    @CurrentUser() user: User,
   ) {
-    return this.operationsService.complete(id, completeOperationDto);
+    return this.operationsService.complete(id, {
+      ...completeOperationDto,
+      confirmedByUserId: user.id,
+    });
   }
 
   @Patch(':id')
@@ -84,8 +93,9 @@ export class OperationsController {
   remove(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: { deleteCode: string },
+    @CurrentUser() user: User,
   ) {
-    return this.operationsService.remove(id, body.deleteCode);
+    return this.operationsService.remove(id, body.deleteCode, user.id);
   }
 
   @Get(':id/summary')
@@ -99,8 +109,12 @@ export class OperationsController {
   completeVerified(
     @Param('id', ParseIntPipe) id: number,
     @Body() completeOperationDto: CompleteOperationDto,
+    @CurrentUser() user: User,
   ) {
-    return this.operationsService.completeVerified(id, completeOperationDto);
+    return this.operationsService.completeVerified(id, {
+      ...completeOperationDto,
+      confirmedByUserId: user.id,
+    });
   }
 
   @Post(':id/payments')

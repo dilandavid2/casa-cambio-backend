@@ -12,12 +12,16 @@ import { Roles } from '../auth/roles.decorator';
 import { CurrenciesService } from './currencies.service';
 import { CreateCurrencyDto } from './dto/create-currency.dto';
 import { UpdateCurrencyDto } from './dto/update-currency.dto';
+import { ConfirmPinDto } from '../auth/dto/confirm-pin.dto';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { User } from '@prisma/client';
 
 @Controller('currencies')
 export class CurrenciesController {
   constructor(private readonly currenciesService: CurrenciesService) {}
 
   @Post()
+  @Roles('ADMIN')
   create(@Body() createCurrencyDto: CreateCurrencyDto) {
     return this.currenciesService.create(createCurrencyDto);
   }
@@ -39,6 +43,7 @@ export class CurrenciesController {
   }
 
   @Patch(':id')
+  @Roles('ADMIN')
   update(
     @Param('id', ParseIntPipe) id: number,
     @Body() updateCurrencyDto: UpdateCurrencyDto,
@@ -47,7 +52,12 @@ export class CurrenciesController {
   }
 
   @Delete(':id')
-  remove(@Param('id', ParseIntPipe) id: number) {
-    return this.currenciesService.remove(id);
+  @Roles('ADMIN')
+  remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ConfirmPinDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.currenciesService.remove(id, user.id, dto.pin);
   }
 }

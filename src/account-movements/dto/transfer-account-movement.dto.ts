@@ -11,6 +11,7 @@ export class TransferAccountMovementDto {
   @Min(0.0001)
   amount!: number;
 
+  @IsOptional()
   @IsInt()
   createdById!: number;
 

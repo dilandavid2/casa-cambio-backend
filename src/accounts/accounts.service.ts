@@ -8,6 +8,7 @@ import { CreateAccountDto } from './dto/create-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { ReplaceAccountDto } from './dto/replace-account.dto';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import { verify } from 'argon2';
 
 @Injectable()
 export class AccountsService {
@@ -240,6 +241,50 @@ export class AccountsService {
     });
   }
 
+  async remove(id: number, userId: number, pin: string) {
+    const account = await this.findOne(id);
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    let pinMatches = false;
+    try {
+      pinMatches = !!user && (await verify(user.pinHash, pin));
+    } catch {
+      pinMatches = false;
+    }
+    if (!pinMatches) throw new BadRequestException('PIN incorrecto');
+
+    const relations = await this.prisma.account.findUnique({
+      where: { id },
+      select: {
+        _count: {
+          select: {
+            sourceOperations: true,
+            targetOperations: true,
+            operationSplits: true,
+            operationPayments: true,
+            paymentMethods: true,
+            nextAccounts: true,
+          },
+        },
+      },
+    });
+    const relationCount = Object.values(relations!._count).reduce(
+      (total, count) => total + count,
+      0,
+    );
+    if (relationCount > 0) {
+      throw new BadRequestException(
+        `No se puede borrar ${account.name} porque participa en operaciones o tiene cuentas relacionadas`,
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.accountMovement.deleteMany({
+        where: { accountId: id, operationId: null },
+      });
+      return tx.account.delete({ where: { id } });
+    });
+  }
+
   async replace(id: number, replaceAccountDto: ReplaceAccountDto) {
     const oldAccount = await this.findOne(id);
 
@@ -254,8 +299,13 @@ export class AccountsService {
       );
     }
 
-    // ⚠️ Por ahora comparación simple (luego se puede hashear)
-    if (user.pinHash !== replaceAccountDto.pin) {
+    let pinMatches = false;
+    try {
+      pinMatches = await verify(user.pinHash, replaceAccountDto.pin);
+    } catch {
+      pinMatches = false;
+    }
+    if (!pinMatches) {
       throw new NotFoundException('PIN incorrecto');
     }
 
@@ -440,6 +490,7 @@ export class AccountsService {
     amount: number,
     description?: string,
     operationDate?: string,
+    createdById?: number,
   ) {
     if (fromAccountId === toAccountId) {
       throw new BadRequestException(
@@ -486,6 +537,12 @@ export class AccountsService {
         where: { name: 'Completada' },
       });
 
+      if (!transferType || !completedStatus || !createdById) {
+        throw new BadRequestException(
+          'Faltan catálogos iniciales o el usuario autenticado',
+        );
+      }
+
       let systemClient = await tx.client.findFirst({
         where: { name: 'Sistema interno' },
       });
@@ -494,7 +551,7 @@ export class AccountsService {
         systemClient = await tx.client.create({
           data: {
             name: 'Sistema interno',
-            type: 'FORMAL',
+            type: 'GENERIC',
           },
         });
       }
@@ -503,8 +560,8 @@ export class AccountsService {
         data: {
           code: `TRF-${Date.now()}`,
           clientId: systemClient.id,
-          typeId: transferType?.id ?? 1,
-          statusId: completedStatus?.id ?? 1,
+          typeId: transferType.id,
+          statusId: completedStatus.id,
           sourceCurrencyId: fromAccount.currencyId,
           sourceAccountId: fromAccountId,
           targetCurrencyId: toAccount.currencyId,
@@ -519,7 +576,7 @@ export class AccountsService {
           amountPaid: amount,
           pendingAmount: 0,
           operationDate: movementDate,
-          createdById: 1,
+          createdById,
         },
       });
       const updatedFrom = await tx.account.update({
