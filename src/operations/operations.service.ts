@@ -490,7 +490,8 @@ export class OperationsService {
         copToTargetRate: targetRateToCOP,
         operationalPercent,
         effectiveRate,
-        clientRate: effectiveRate,
+        clientRate:
+          finalAmountTargetEstimated / createOperationDto.amountSource,
         valueCOP,
         paymentStatus,
         amountPaid,
