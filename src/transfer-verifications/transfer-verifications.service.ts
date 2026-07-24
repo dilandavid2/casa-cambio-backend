@@ -18,10 +18,13 @@ export class TransferVerificationsService {
     return this.prisma.transferVerification.findMany({
       where: {
         status: 'PENDING',
+        operation: {
+          sourceCurrency: {
+            code: 'VES',
+          },
+        },
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      orderBy: { createdAt: 'asc' },
       include: {
         operation: {
           include: {
@@ -34,11 +37,17 @@ export class TransferVerificationsService {
     });
   }
 
-  async confirm(id: number, dto: ConfirmTransferVerificationDto) {
+  async confirm(
+    id: number,
+    dto: ConfirmTransferVerificationDto,
+    verifiedById: number,
+  ) {
     const verification = await this.prisma.transferVerification.findUnique({
       where: { id },
       include: {
-        operation: true,
+        operation: {
+          include: { sourceCurrency: true },
+        },
       },
     });
 
@@ -50,72 +59,64 @@ export class TransferVerificationsService {
       throw new BadRequestException('Esta verificación ya fue procesada');
     }
 
-    const updated = await this.prisma.transferVerification.update({
-      where: { id },
-      data: {
-        status: 'CONFIRMED',
-        verifiedAt: new Date(),
-        verifiedById: dto.verifiedById,
-        notes: dto.notes,
-      },
-      include: {
-        operation: true,
-        verifiedBy: true,
-      },
-    });
-
-    const originalOperation = verification.operation;
-
-    await this.prisma.operationPayment.updateMany({
-      where: {
-        operationId: originalOperation.id,
-        verifiedAt: null,
-      },
-      data: {
-        verifiedAt: new Date(),
-      },
-    });
-    const pagos = await this.prisma.operationPayment.findMany({
-      where: { operationId: verification.operationId },
-    });
-
-    const totalPaidCOP = pagos.reduce(
-      (sum, payment) =>
-        sum + (payment.verifiedAt ? (payment.valueCOP ?? 0) : 0),
-      0,
-    );
-
-    const operation = await this.prisma.operation.findUnique({
-      where: { id: verification.operationId },
-    });
-
-    if (!operation) {
-      throw new NotFoundException('No se encontró la operación');
+    if (verification.operation.sourceCurrency.code !== 'VES') {
+      throw new BadRequestException(
+        'Este apartado solo confirma transferencias recibidas en VES',
+      );
     }
 
-    const deudaBaseCOP =
-      operation.valueCOP ?? operation.amountTargetEstimated ?? 0;
+    const verifiedStatus = await this.prisma.operationStatus.findFirst({
+      where: { name: 'Verificada' },
+    });
 
-    const pendingAmount = Number((deudaBaseCOP - totalPaidCOP).toFixed(2));
+    if (!verifiedStatus) {
+      throw new BadRequestException(
+        'No existe el estado "Verificada" requerido para continuar',
+      );
+    }
 
-    const paymentStatus =
-      pendingAmount <= 0 ? 'PAID' : totalPaidCOP > 0 ? 'PARTIAL' : 'PENDING';
+    const verifiedAt = new Date();
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const confirmed = await tx.transferVerification.update({
+        where: { id },
+        data: {
+          status: 'CONFIRMED',
+          verifiedAt,
+          verifiedById,
+          notes: dto.notes,
+        },
+        include: {
+          operation: true,
+          verifiedBy: true,
+        },
+      });
 
-    await this.prisma.operation.update({
-      where: { id: verification.operationId },
-      data: {
-        amountPaid: Number(totalPaidCOP.toFixed(2)),
-        pendingAmount: pendingAmount > 0 ? pendingAmount : 0,
-        paymentStatus,
-      },
+      await tx.operationPayment.updateMany({
+        where: {
+          operationId: verification.operationId,
+          requiresVerification: true,
+          verifiedAt: null,
+        },
+        data: { verifiedAt },
+      });
+
+      await tx.operation.update({
+        where: { id: verification.operationId },
+        data: {
+          statusId: verifiedStatus.id,
+          verifiedAt,
+        },
+      });
+
+      return confirmed;
     });
 
     await this.auditLogsService.createLog({
-      userId: dto.verifiedById,
+      userId: verifiedById,
       action: 'CONFIRM_TRANSFER_VERIFICATION',
       entityType: 'TransferVerification',
       entityId: id,
-      description: `Transferencia verificada para operación ${verification.operation.code}`,
+      description: `Transferencia VES verificada para operación ${verification.operation.code}`,
     });
 
     return {

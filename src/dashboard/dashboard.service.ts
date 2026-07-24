@@ -5,8 +5,121 @@ import { PrismaService } from '../prisma/prisma.service';
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private primaryRatesCache:
+    | {
+        expiresAt: number;
+        data: Array<{
+          code: string;
+          name: string;
+          rateToCOP: number | null;
+          rateDate: Date | null;
+          source: string;
+          external: boolean;
+        }>;
+      }
+    | undefined;
+
   private round2(value: number) {
     return Number(value.toFixed(2));
+  }
+
+  async getPrimaryRates() {
+    const primaryCodes = ['CLP', 'EUR', 'VES', 'USD'];
+    const currencyNames: Record<string, string> = {
+      CLP: 'Peso chileno',
+      EUR: 'Euro',
+      VES: 'Bolívar venezolano',
+      USD: 'Dólar estadounidense',
+    };
+
+    if (
+      this.primaryRatesCache &&
+      this.primaryRatesCache.expiresAt > Date.now()
+    ) {
+      return this.primaryRatesCache.data;
+    }
+
+    try {
+      const response = await fetch(
+        'https://open.er-api.com/v6/latest/COP',
+        { signal: AbortSignal.timeout(6000) },
+      );
+
+      if (!response.ok) {
+        throw new Error(`ExchangeRate-API respondió HTTP ${response.status}`);
+      }
+
+      const externalData = (await response.json()) as {
+        result?: string;
+        time_last_update_unix?: number;
+        rates?: Record<string, number>;
+      };
+
+      if (externalData.result !== 'success' || !externalData.rates) {
+        throw new Error('ExchangeRate-API devolvió una respuesta inválida');
+      }
+
+      const rateDate = externalData.time_last_update_unix
+        ? new Date(externalData.time_last_update_unix * 1000)
+        : new Date();
+      const data = primaryCodes.map((code) => {
+        const copToCurrency = externalData.rates?.[code];
+
+        return {
+          code,
+          name: currencyNames[code],
+          rateToCOP:
+            copToCurrency && copToCurrency > 0
+              ? Number((1 / copToCurrency).toFixed(8))
+              : null,
+          rateDate,
+          source: 'ExchangeRate-API',
+          external: true,
+        };
+      });
+
+      this.primaryRatesCache = {
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        data,
+      };
+
+      return data;
+    } catch (error) {
+      console.error(
+        'No se pudieron consultar las tasas externas; se usarán las internas',
+        error,
+      );
+    }
+
+    const currencies = await this.prisma.currency.findMany({
+      where: {
+        code: { in: primaryCodes },
+        isActive: true,
+      },
+      include: {
+        marketRates: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+    const byCode = new Map(
+      currencies.map((currency) => [currency.code, currency]),
+    );
+
+    return primaryCodes.map((code) => {
+      const currency = byCode.get(code);
+      const latestRate = currency?.marketRates[0];
+
+      return {
+        code,
+        name: currency?.name ?? currencyNames[code],
+        rateToCOP: latestRate?.rateToCOP ?? null,
+        rateDate: latestRate?.createdAt ?? null,
+        source: 'Última tasa interna',
+        external: false,
+      };
+    });
   }
 
   async getFinancialDashboard() {

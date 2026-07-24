@@ -30,6 +30,10 @@ export class DashboardController {
   getGlobalBalance() {
     return this.dashboardService.getGlobalBalance();
   }
+  @Get('primary-rates')
+  getPrimaryRates() {
+    return this.dashboardService.getPrimaryRates();
+  }
   @Get('top-accounts')
   getTopAccounts() {
     return this.dashboardService.getTopAccounts();

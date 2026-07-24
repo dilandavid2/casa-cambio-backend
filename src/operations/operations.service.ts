@@ -22,6 +22,53 @@ export class OperationsService {
     return Number(value.toFixed(2));
   }
 
+  private generateOperationCode() {
+    const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+    return `OP-${date}-${suffix}`;
+  }
+
+  async getSuggestions(query: string) {
+    const term = query.trim();
+    const textFilter = term
+      ? { contains: term, mode: 'insensitive' as const }
+      : undefined;
+
+    const [clients, operations] = await Promise.all([
+      this.prisma.client.findMany({
+        where: {
+          isActive: true,
+          ...(textFilter ? { name: textFilter } : {}),
+        },
+        select: { name: true },
+        distinct: ['name'],
+        orderBy: { name: 'asc' },
+        take: 8,
+      }),
+      this.prisma.operation.findMany({
+        where: {
+          description: textFilter ? textFilter : { not: null },
+        },
+        select: { description: true },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+      }),
+    ]);
+
+    return {
+      clients: clients.map((client) => client.name),
+      descriptions: [
+        ...new Set(
+          operations
+            .map((operation) => operation.description)
+            .filter(
+              (description): description is string => Boolean(description),
+            ),
+        ),
+      ].slice(0, 8),
+    };
+  }
+
   async estimate(data: {
     sourceCurrencyId: number;
     targetCurrencyId: number;
@@ -207,6 +254,21 @@ export class OperationsService {
     if (!targetCurrency) {
       throw new NotFoundException(
         `No se encontró la moneda destino con id ${createOperationDto.targetCurrencyId}`,
+      );
+    }
+
+    const requiresVesVerification =
+      createOperationDto.paymentMode === 'IMMEDIATE' &&
+      sourceCurrency.code === 'VES';
+    const verificationStatus = requiresVesVerification
+      ? await this.prisma.operationStatus.findFirst({
+          where: { name: 'En verificación' },
+        })
+      : null;
+
+    if (requiresVesVerification && !verificationStatus) {
+      throw new BadRequestException(
+        'No existe el estado "En verificación" requerido para recibir VES',
       );
     }
 
@@ -477,10 +539,11 @@ export class OperationsService {
 
     const operation = await this.prisma.operation.create({
       data: {
-        code: createOperationDto.code,
+        code: createOperationDto.code?.trim() || this.generateOperationCode(),
+        description: createOperationDto.description.trim(),
         clientId: client.id,
         typeId: operationType.id,
-        statusId: operationStatus.id,
+        statusId: verificationStatus?.id ?? operationStatus.id,
         sourceCurrencyId: createOperationDto.sourceCurrencyId,
         sourceAccountId: createOperationDto.sourceAccountId ?? null,
         targetCurrencyId: createOperationDto.targetCurrencyId,
@@ -513,6 +576,16 @@ export class OperationsService {
           preparedPayments.length > 0
             ? { create: preparedPayments }
             : undefined,
+        transferVerifications: requiresVesVerification
+          ? {
+              create: {
+                status: 'PENDING',
+                reason: 'Entrada de bolívares pendiente por verificar',
+                notes:
+                  'La operación no puede completarse hasta confirmar la transferencia recibida en VES',
+              },
+            }
+          : undefined,
       },
       include: {
         client: true,
@@ -536,6 +609,31 @@ export class OperationsService {
         },
       },
     });
+
+    const observedRates = [
+      ...(sourceCurrency.code === 'COP'
+        ? []
+        : [
+            {
+              currencyId: sourceCurrency.id,
+              rateToCOP: marketRate,
+              source: `OPERATION:${operation.id}`,
+            },
+          ]),
+      ...(targetCurrency.code === 'COP'
+        ? []
+        : [
+            {
+              currencyId: targetCurrency.id,
+              rateToCOP: targetRateToCOP,
+              source: `OPERATION:${operation.id}`,
+            },
+          ]),
+    ];
+
+    if (observedRates.length > 0) {
+      await this.prisma.marketRate.createMany({ data: observedRates });
+    }
 
     if (
       createOperationDto.paymentMode === 'PENDING' &&
@@ -574,7 +672,7 @@ export class OperationsService {
     }
 
     await this.auditLogsService.createLog({
-      userId: createOperationDto.createdById,
+      userId: createdById,
       action: 'CREATE_OPERATION',
       entityType: 'Operation',
       entityId: operation.id,
@@ -974,6 +1072,49 @@ export class OperationsService {
       );
     }
 
+    if (operation.sourceCurrency.code === 'VES') {
+      const verification = await this.prisma.transferVerification.findFirst({
+        where: { operationId: id },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (!verification) {
+        const verificationStatus = await this.prisma.operationStatus.findFirst({
+          where: { name: 'En verificación' },
+        });
+
+        if (!verificationStatus) {
+          throw new BadRequestException(
+            'No existe el estado "En verificación"',
+          );
+        }
+
+        await this.prisma.transferVerification.create({
+          data: {
+            operationId: id,
+            status: 'PENDING',
+            reason: 'Entrada de bolívares pendiente por verificar',
+            notes:
+              'Verificación creada automáticamente antes de completar la operación',
+          },
+        });
+        await this.prisma.operation.update({
+          where: { id },
+          data: { statusId: verificationStatus.id },
+        });
+
+        throw new BadRequestException(
+          'La entrada en VES debe verificarse antes de completar la operación',
+        );
+      }
+
+      if (verification.status !== 'CONFIRMED') {
+        throw new BadRequestException(
+          'La transferencia recibida en VES todavía no ha sido verificada',
+        );
+      }
+    }
+
     const amountTargetFinal = this.round2(
       completeOperationDto.amountTargetFinal,
     );
@@ -984,56 +1125,6 @@ export class OperationsService {
       realProfitCOP = this.round2(operation.valueCOP - amountTargetFinal);
     } else {
       realProfitCOP = null;
-    }
-
-    if (completeOperationDto.requiresTransferVerification) {
-      const existingVerification =
-        await this.prisma.transferVerification.findFirst({
-          where: {
-            operationId: id,
-            status: 'PENDING',
-          },
-        });
-
-      if (existingVerification) {
-        throw new BadRequestException(
-          'Esta operación ya tiene una verificación pendiente',
-        );
-      }
-
-      const verification = await this.prisma.transferVerification.create({
-        data: {
-          operationId: id,
-          status: 'PENDING',
-          reason: 'Transferencia bancaria pendiente por verificar',
-          notes: 'El operador debe confirmar que el dinero ingresó al banco',
-        },
-        include: {
-          operation: true,
-        },
-      });
-
-      const verificationStatus = await this.prisma.operationStatus.findFirst({
-        where: { name: 'En verificación' },
-      });
-
-      if (!verificationStatus) {
-        throw new BadRequestException(
-          'No existe el estado En verificación en OperationStatus',
-        );
-      }
-
-      await this.prisma.operation.update({
-        where: { id },
-        data: {
-          statusId: verificationStatus.id,
-        },
-      });
-
-      return {
-        message: 'Operación enviada a verificación bancaria',
-        verification,
-      };
     }
 
     if (
@@ -1498,6 +1589,7 @@ export class OperationsService {
       operation: {
         id: operation.id,
         code: operation.code,
+        description: operation.description,
         paymentMode: operation.paymentMode ?? 'IMMEDIATE',
         client: operation.client?.name ?? 'Cliente sin registrar',
         type: operation.type.name,

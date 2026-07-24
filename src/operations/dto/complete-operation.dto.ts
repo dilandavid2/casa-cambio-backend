@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsNumber, IsOptional, Min } from 'class-validator';
+import { IsInt, IsNumber, IsOptional, Min } from 'class-validator';
 
 export class CompleteOperationDto {
   @IsNumber()
@@ -13,7 +13,4 @@ export class CompleteOperationDto {
   @IsInt()
   accountId?: number;
 
-  @IsOptional()
-  @IsBoolean()
-  requiresTransferVerification?: boolean;
 }

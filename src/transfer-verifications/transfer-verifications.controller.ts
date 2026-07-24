@@ -9,6 +9,8 @@ import {
 import { TransferVerificationsService } from './transfer-verifications.service';
 import { ConfirmTransferVerificationDto } from './dto/confirm-transfer-verification.dto';
 import { Roles } from '../auth/roles.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { User } from '@prisma/client';
 
 @Controller('transfer-verifications')
 export class TransferVerificationsController {
@@ -27,7 +29,8 @@ export class TransferVerificationsController {
   confirm(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: ConfirmTransferVerificationDto,
+    @CurrentUser() user: User,
   ) {
-    return this.transferVerificationsService.confirm(id, dto);
+    return this.transferVerificationsService.confirm(id, dto, user.id);
   }
 }

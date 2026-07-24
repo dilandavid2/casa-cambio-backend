@@ -11,6 +11,8 @@ import {
   Min,
   ValidateNested,
   IsEnum,
+  MaxLength,
+  IsNotEmpty,
 } from 'class-validator';
 
 export class OperationSplitDto {
@@ -42,8 +44,14 @@ export class OperationSplitDto {
 }
 
 export class CreateOperationDto {
+  @IsOptional()
   @IsString()
-  code: string;
+  code?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  description: string;
 
   @IsOptional()
   @IsInt()

@@ -194,8 +194,9 @@ model OperationStatus {
 /////////////////////////
 
 model Operation {
-  id   Int    @id @default(autoincrement())
-  code String @unique
+  id          Int     @id @default(autoincrement())
+  code        String  @unique
+  description String?
 
   clientId Int
   client   Client @relation(fields: [clientId], references: [id])

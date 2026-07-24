@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { OperationsService } from './operations.service';
 import { CreateOperationDto } from './dto/create-operation.dto';
@@ -59,6 +60,12 @@ export class OperationsController {
   @Roles('ADMIN', 'OPERATOR')
   getGlobalSummary() {
     return this.operationsService.getGlobalSummary();
+  }
+
+  @Get('suggestions')
+  @Roles('ADMIN', 'OPERATOR')
+  getSuggestions(@Query('q') query = '') {
+    return this.operationsService.getSuggestions(query);
   }
 
   @Get(':id')
